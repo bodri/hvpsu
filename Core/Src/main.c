@@ -23,6 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+#include <stdbool.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,15 +46,22 @@ ADC_HandleTypeDef hadc2;
 DMA_HandleTypeDef hdma_adc2;
 
 TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim8;
 
 /* USER CODE BEGIN PV */
 
+bool loopTimeElapsed = false;
+int stepCounter = 0;
+
 volatile uint16_t adc2Readings[4]; //ADC Readings
 
-volatile float targetVoltage = 240.0f;
+volatile float targetVoltage = 200.0f;
 volatile float voltageError = 0;
-static const float kp = 5.0f;
+volatile float integral = 0;
+static const float kp = 100.0f;
+static const float ki = 1.2f;
+static const float dt = 0.1f;
 
 int32_t phase = 0;
 
@@ -65,12 +74,19 @@ static void MX_DMA_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM8_Init(void);
 static void MX_ADC2_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+	if (htim->Instance == TIM2) {
+		loopTimeElapsed = true;
+	}
+}
 
 /* USER CODE END 0 */
 
@@ -106,6 +122,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM8_Init();
   MX_ADC2_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
   // Calibrate ADC
@@ -133,20 +150,36 @@ int main(void)
 
   HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Start(&htim8, TIM_CHANNEL_1);
+
+  HAL_TIM_Base_Start_IT(&htim2);
   while (1)
   {
-	 float currentVoltage = ((((float)adc2Readings[0] * 3.3f) / 4096.0f) - 1.6f) * 2.0 * 3620000.0 / 20000.0f;
+	  if (loopTimeElapsed) {
+		  float currentVoltage = ((((float)adc2Readings[0] * 3.3f) / 4096.0f) - 1.6f) * 2.0 * 3620000.0 / 20000.0f;
 
-	 voltageError = targetVoltage - currentVoltage;
+		  voltageError = targetVoltage - currentVoltage;
+		  integral += voltageError * dt;
 
-	 phase = kp * voltageError;
-	 if (phase > 398) phase = 398;
-	 if (phase < 0) phase = 0;
+		  phase = kp * voltageError + ki * integral;
+		  if (phase > 398) phase = 398;
+		  if (phase < 0) phase = 0;
 
-	 SET_BIT(TIM8->CR1, TIM_CR1_UDIS);
-	 TIM8->CCR1 = 399 - phase;
-	 TIM8->CCR2 = phase;
-	 CLEAR_BIT(TIM8->CR1, TIM_CR1_UDIS);
+		  SET_BIT(TIM8->CR1, TIM_CR1_UDIS);
+		  TIM8->CCR1 = 399 - phase;
+		  TIM8->CCR2 = phase;
+		  CLEAR_BIT(TIM8->CR1, TIM_CR1_UDIS);
+
+		  loopTimeElapsed = false;
+		  stepCounter++;
+		  if (stepCounter == 10000) {
+			  HAL_GPIO_TogglePin(STEP_GPIO_Port, STEP_Pin);
+//			  if (targetVoltage == 50.0f)
+//				  targetVoltage = 50.0f;
+//			  else
+//				  targetVoltage = 50.0f;
+			  stepCounter = 0;
+		  }
+	  }
 
     /* USER CODE END WHILE */
 
@@ -195,14 +228,7 @@ void SystemClock_Config(void)
     Error_Handler();
   }
   PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
-  PeriphClkInit.AdcClockSelection = RCC_ADCCLKSOURCE_PLLSAI1;
-  PeriphClkInit.PLLSAI1.PLLSAI1Source = RCC_PLLSOURCE_HSE;
-  PeriphClkInit.PLLSAI1.PLLSAI1M = 1;
-  PeriphClkInit.PLLSAI1.PLLSAI1N = 8;
-  PeriphClkInit.PLLSAI1.PLLSAI1P = RCC_PLLP_DIV7;
-  PeriphClkInit.PLLSAI1.PLLSAI1Q = RCC_PLLQ_DIV2;
-  PeriphClkInit.PLLSAI1.PLLSAI1R = RCC_PLLR_DIV2;
-  PeriphClkInit.PLLSAI1.PLLSAI1ClockOut = RCC_PLLSAI1_ADC1CLK;
+  PeriphClkInit.AdcClockSelection = RCC_ADCCLKSOURCE_SYSCLK;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
@@ -248,7 +274,11 @@ static void MX_ADC2_Init(void)
   hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc2.Init.DMAContinuousRequests = ENABLE;
   hadc2.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
-  hadc2.Init.OversamplingMode = DISABLE;
+  hadc2.Init.OversamplingMode = ENABLE;
+  hadc2.Init.Oversampling.Ratio = ADC_OVERSAMPLING_RATIO_16;
+  hadc2.Init.Oversampling.RightBitShift = ADC_RIGHTBITSHIFT_4;
+  hadc2.Init.Oversampling.TriggeredMode = ADC_TRIGGEREDMODE_SINGLE_TRIGGER;
+  hadc2.Init.Oversampling.OversamplingStopReset = ADC_REGOVERSAMPLING_CONTINUED_MODE;
   if (HAL_ADC_Init(&hadc2) != HAL_OK)
   {
     Error_Handler();
@@ -355,6 +385,51 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 2 */
   HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 0;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 399;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
 
 }
 
@@ -474,12 +549,23 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(STEP_GPIO_Port, STEP_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : STEP_Pin */
+  GPIO_InitStruct.Pin = STEP_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(STEP_GPIO_Port, &GPIO_InitStruct);
 
 }
 
